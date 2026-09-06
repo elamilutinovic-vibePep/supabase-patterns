@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:rls": "node --env-file=.env rls-pattern-example/test-rls-isolation.js"
+    "test:rls": "node --env-file=.env rls-pattern-example/test-rls-isolation.js",
+    "test:rpc-boundary": "node --env-file=.env edge-to-rpc-example/test-rpc-boundary.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2"

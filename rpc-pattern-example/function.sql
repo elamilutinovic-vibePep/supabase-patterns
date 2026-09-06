@@ -3,6 +3,7 @@ create or replace function public.create_note(p_title text, p_body text default 
 returns public.notes
 language plpgsql
 security invoker
+set search_path = ''
 as $$
 declare
   v_row public.notes;

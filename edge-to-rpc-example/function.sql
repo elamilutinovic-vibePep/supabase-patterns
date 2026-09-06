@@ -6,6 +6,7 @@ create or replace function public.create_contact_message(
 returns public.contact_messages
 language plpgsql
 security invoker
+set search_path = ''
 as $$
 declare
   v_row public.contact_messages;

@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:rls": "node rls-pattern-example/test-rls-isolation.js"
+    "test:rls": "node --env-file=.env rls-pattern-example/test-rls-isolation.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2"

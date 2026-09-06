@@ -1,259 +1,463 @@
-# Supabase Backend Hardening – 15 Minute Audit
+# Supabase Backend Security Triage
 
-Purpose:  
-Quickly detect security and architecture risks in Supabase projects.
+## Purpose
 
-Typical use cases:
+Use this procedure for a fast initial review of an existing Supabase backend.
 
-- auditing AI-generated backend
-- reviewing Lovable / no-code Supabase projects
-- debugging data access issues
-- freelance backend hardening tasks
+Typical use cases include:
 
-Goal: find **80% of issues in about 15 minutes**.
+- assessing an AI-generated or no-code backend;
+- reviewing a Lovable project;
+- investigating unexpected data access;
+- estimating the scope of a security-hardening task;
+- identifying areas that require a deeper review.
 
----
+This is a triage procedure, not a complete security audit.
 
-# Step 1 — Check RLS status (2 min)
+A short review can reveal obvious high-risk patterns and help prioritize further investigation. It cannot prove that the project is secure or reliably detect a fixed percentage of all issues.
 
-Open the table list and check Row Level Security.
+## Expected output
 
-Questions:
+Record:
 
-- Is RLS enabled on all tables containing user data?
-- Are any tables storing private data without RLS?
+- exposed data paths;
+- ownership and tenant boundaries;
+- immediately visible high-risk patterns;
+- areas that could not be verified;
+- tests and deeper inspection required next.
 
-Example SQL:
-
-    alter table orders enable row level security;
-
-Red flag:
-
-- RLS disabled on tables containing user data.
-
-This means queries can potentially access **all rows**.
+Do not assign a final security rating based only on this procedure.
 
 ---
 
-# Step 2 — Identify ownership model (2 min)
+## Step 1 — Map exposed data paths
 
-Scan table schemas and identify ownership columns.
+Identify every path through which a user-controlled request can reach data:
 
-Typical fields:
+- direct Data API queries;
+- database RPC functions;
+- Edge Functions;
+- Storage operations;
+- server-side endpoints, jobs, and webhooks.
 
-    user_id
-    owner_id
-    family_id
-    student_id
-    organization_id
+For each path, determine:
 
-Ask:
+- which Supabase key is used;
+- whether a user JWT reaches PostgreSQL;
+- which database role executes the request;
+- whether RLS is expected to apply;
+- where authentication and authorization are checked.
 
-Who owns each row?
+Red flags include:
 
-If ownership is unclear, permission rules will be fragile.
-
-Red flag:
-
-Tables storing user data but **no ownership column exists**.
-
----
-
-# Step 3 — Inspect SELECT policies (2 min)
-
-Look for policies such as:
-
-    using (user_id = auth.uid())
-
-Or relational ownership:
-
-    exists (
-      select 1
-      from students s
-      where s.id = attempts.student_id
-      and s.family_id = current_user_family
-    )
-
-Ask:
-
-Can a user ever see another user's data?
-
-Red flags:
-
-- using (true)
-- missing SELECT policy
-- policies that are overly complex
+- an undocumented privileged endpoint;
+- user-controlled identifiers reaching privileged queries;
+- assumptions that requests always pass through one application layer.
 
 ---
 
-# Step 4 — Inspect INSERT and UPDATE policies (2 min)
+## Step 2 — Check table privileges and RLS status
 
-Look for WITH CHECK.
+For every user-facing table, verify:
+
+- which roles have table privileges;
+- whether RLS is enabled;
+- whether applicable policies exist for required operations;
+- whether access occurs through a role that bypasses RLS.
+
+When RLS is enabled and no applicable policy exists, PostgreSQL uses default deny.
+
+When RLS is disabled, policies are not applied. Access then depends on ordinary table privileges and the role executing the query.
 
 Example:
 
-    with check (user_id = auth.uid())
+```sql
+alter table public.orders enable row level security;
+```
 
-Reason:
+Red flags include:
 
-Without WITH CHECK, a user could insert rows for another user.
+- private user data exposed through a client-accessible table without RLS;
+- privileged access whose authorization model is undocumented;
+- testing RLS through a table owner, superuser, or `BYPASSRLS` role.
 
-For UPDATE operations verify both clauses exist:
-
-    using (...)
-    with check (...)
-
-Red flag:
-
-UPDATE policy without WITH CHECK.
+A missing policy is not automatically data exposure. Under enabled RLS, it may instead break an intended operation.
 
 ---
 
-# Step 5 — Review Edge functions (2 min)
+## Step 3 — Identify the ownership model
 
-Search the codebase for Supabase client creation.
+For each protected resource, determine:
 
-Safe pattern:
+- who may read it;
+- who may create or change it;
+- whether access is based on ownership, membership, role, or another relationship;
+- which table is the authorization source of truth;
+- whether an ordinary client can modify that source.
 
-    createClient(url, anonKey, {
-      global: {
-        headers: {
-          Authorization: `Bearer ${jwt}`
-        }
-      }
-    })
+Common boundary columns include:
 
-This ensures:
+```text
+user_id
+family_id
+organization_id
+student_id
+```
 
-- auth.uid() works
-- RLS policies apply
-
-Danger pattern:
-
-    createClient(url, serviceRoleKey)
-
-Ask:
-
-Is this endpoint bypassing RLS?
-
----
-
-# Step 6 — Review RPC functions (2 min)
-
-Look for:
-
-- ownership validation
-- tenant boundary checks
+Ownership does not have to be stored directly on every table. It may be derived through a protected relationship.
 
 Example:
 
-    select *
-    from attempts
-    where student_id = p_student_id
-    and user_owns_family(auth.uid(), family_id)
+```text
+attempt
+  → student
+  → family membership
+  → authenticated user
+```
 
-Ask:
+Red flags include:
 
-Does the function verify ownership or assume it?
-
-Red flag:
-
-RPC returning rows without ownership validation.
-
----
-
-# Step 7 — Check storage security (2 min)
-
-Open Supabase Storage and review bucket policies.
-
-Verify:
-
-- public buckets used only for public assets
-- user content stored in protected buckets
-
-Example rule:
-
-    owner = auth.uid()
-
-Red flag:
-
-User files stored in **public buckets**.
+- no identifiable authorization path;
+- tenant identifiers that can disagree across related rows;
+- clients able to grant themselves membership or privileged roles;
+- policies depending on an unprotected membership table.
 
 ---
 
-# Step 8 — Look for duplicated access logic (1 min)
+## Step 4 — Inspect operation-specific policies
 
-Search code for patterns like:
+### SELECT
 
-    where user_id =
+A `SELECT` policy uses `USING` to determine which existing rows are visible.
 
-If permission logic is duplicated across endpoints:
+Example:
 
-Red flag:
+```sql
+using (user_id = auth.uid())
+```
 
-Access control scattered across application code.
+Check for:
 
-Better approach:
+- `USING (true)` on private data;
+- incomplete tenant conditions;
+- multiple permissive policies whose combined `OR` behavior is too broad;
+- helper functions that derive access from mutable or unprotected data.
 
-    RLS policies
-    + helper database functions
+A missing applicable `SELECT` policy under enabled RLS denies the rows. It does not make them globally visible.
 
-Single source of truth.
+### INSERT
 
----
+An `INSERT` policy uses `WITH CHECK` to validate the proposed row.
 
-# Quick Risk Scoring
+Example:
 
-Low risk:
-RLS properly implemented.
+```sql
+with check (user_id = auth.uid())
+```
 
-Medium risk:
-RLS inconsistent or incomplete.
+Check whether a caller can:
 
-High risk:
-service_role bypass or missing ownership.
+- insert a row for another user;
+- select another tenant identifier;
+- create a membership or role that grants later access.
 
----
+A default such as `user_id default auth.uid()` supports the normal insert path but does not replace authorization.
 
-# Common Problems in AI-Generated Supabase Apps
+### UPDATE
 
-Typical issues found during audits:
+An `UPDATE` policy can apply separate rules to the existing and proposed row:
 
-1. RLS disabled
-2. service_role used everywhere
-3. tables without ownership columns
-4. public storage buckets for private data
-5. duplicated permission logic in API code
+```sql
+using (user_id = auth.uid())
+with check (user_id = auth.uid())
+```
 
-These appear very frequently.
+- `USING` determines which existing rows may be targeted.
+- `WITH CHECK` validates the proposed new row.
 
----
+When `WITH CHECK` is omitted, PostgreSQL can reuse the `USING` expression for the new row. Its absence is therefore not automatically a vulnerability.
 
-# Audit Summary Template
+Define `WITH CHECK` explicitly when it makes the intended rule clearer or when the new-row rule differs from visibility.
 
-Example report for a client:
+Also inspect the privileges and `SELECT` policy required by the actual update query.
 
-    Supabase Security Audit Summary
+### DELETE
 
-    Tables reviewed: 12
-    RLS enabled: 9 / 12
-    High risk issues: 2
-    Medium risk issues: 3
+A `DELETE` policy uses `USING` to determine which existing rows may be targeted.
 
-    Key findings:
-    - Orders table missing SELECT policy
-    - Edge function bypassing RLS with service_role
-    - Storage bucket "uploads" publicly readable
-
-    Recommended actions:
-    - Add ownership-based RLS policies
-    - Replace service_role client with JWT-authenticated client
-    - Restrict storage access with bucket policies
+Verify affected-row behavior. A disallowed row may be filtered out instead of producing an explicit authorization error.
 
 ---
 
-# Core Principle
+## Step 5 — Review RPC functions
 
-Database enforces security.  
-API orchestrates logic.  
-Frontend never enforces access control.
+For every client-accessible function, inspect:
+
+- `SECURITY INVOKER` or `SECURITY DEFINER`;
+- function ownership;
+- the effective `search_path`;
+- `EXECUTE` privileges;
+- the caller identity visible through `auth.uid()`;
+- validation and authorization logic;
+- RLS behavior for accessed tables.
+
+For an authenticated-only function:
+
+```sql
+revoke execute on function public.example_function(text)
+from public, anon;
+
+grant execute on function public.example_function(text)
+to authenticated;
+```
+
+A `SECURITY INVOKER` function normally runs with the caller's privileges and remains subject to the caller's RLS context.
+
+A `SECURITY DEFINER` function requires additional review because it runs with the function owner's privileges. Verify explicit authorization, minimal privileges, and a safe `search_path`.
+
+Red flags include:
+
+- public execution of an intended authenticated-only operation;
+- a definer function trusting user-supplied ownership identifiers;
+- authorization assumed to exist only in the calling Edge Function;
+- functions returning data without a verified ownership or tenant rule.
+
+---
+
+## Step 6 — Review Edge Functions
+
+Search for Supabase client creation and identify the intended execution context.
+
+When PostgreSQL should apply RLS as the user, forward the caller's authorization header through a client created with the anon key:
+
+```typescript
+createClient(url, anonKey, {
+  global: {
+    headers: {
+      Authorization: authHeader,
+    },
+  },
+});
+```
+
+Verify that:
+
+- the Bearer token is required and validated;
+- the caller's JWT reaches PostgreSQL;
+- `auth.uid()` represents the intended user;
+- validation required by a directly callable RPC is not implemented only in Edge code;
+- errors do not disclose sensitive internals.
+
+A client created with `service_role` bypasses RLS. This can be legitimate for a privileged backend operation, but the Edge Function must then perform explicit authorization before accessing data.
+
+Red flags include:
+
+- `service_role` used merely to make a failing query work;
+- privileged reads based only on a user-supplied row ID;
+- an endpoint that authenticates a user but never verifies permission for the requested resource.
+
+---
+
+## Step 7 — Review service-role usage
+
+For every use of `service_role`, document:
+
+- why RLS bypass is necessary;
+- how the caller is authenticated;
+- how authorization is enforced;
+- which rows or objects may be accessed;
+- whether user-controlled identifiers influence the query;
+- whether a narrower database operation could reduce the privilege boundary.
+
+`service_role` is not automatically a vulnerability. Unjustified or insufficiently authorized use is a high-risk finding.
+
+Never expose the service-role key to a browser or other untrusted client.
+
+---
+
+## Step 8 — Check Storage authorization
+
+For each bucket, determine:
+
+- whether it is intentionally public or private;
+- what information object paths encode;
+- which roles may upload, read, update, and delete;
+- how tenant or owner membership is verified;
+- how signed URLs are authorized and generated.
+
+A public bucket is appropriate only for intentionally public assets.
+
+A private bucket prevents unrestricted public retrieval, but it does not by itself prove tenant isolation.
+
+Do not assume that a condition such as:
+
+```sql
+owner_id = auth.uid()
+```
+
+is sufficient for every storage model. Authorization may instead depend on a protected tenant path or membership relationship.
+
+Red flags include:
+
+- private user documents placed in a public bucket;
+- path-based authorization without validated path structure;
+- signed URLs generated before checking access;
+- Storage policies relying on a membership source that clients can modify.
+
+---
+
+## Step 9 — Inspect duplicated authorization logic
+
+Search application and database code for repeated ownership or tenant conditions.
+
+Examples include:
+
+```text
+where user_id =
+family_id =
+organization_id =
+```
+
+Duplication is not automatically a vulnerability. It becomes risky when different paths implement conflicting versions of the same authorization rule.
+
+Determine whether the source of truth is:
+
+- an RLS policy;
+- a protected helper function;
+- an explicitly privileged server operation;
+- or an undocumented mixture of application checks.
+
+Database authorization should remain effective when a client bypasses the expected frontend flow.
+
+---
+
+## Step 10 — Perform focused behavioral tests
+
+Static inspection identifies hypotheses. Verify important boundaries with at least two users from different ownership or tenant contexts.
+
+Test:
+
+- allowed operations for the owner;
+- cross-owner and cross-tenant reads;
+- insertion with another user's owner ID;
+- attempted ownership transfer during update;
+- affected-row results for blocked updates and deletes;
+- anonymous access to authenticated-only RPCs;
+- direct RPC calls that bypass Edge validation;
+- Storage access across tenant paths.
+
+Assert returned identities, ownership fields, and affected-row counts. A successful HTTP response alone does not prove correct authorization.
+
+Use only a disposable local or test project when tests create, modify, or delete data.
+
+---
+
+## Initial finding priorities
+
+### Immediate investigation
+
+Examples:
+
+- service-role key exposed to an untrusted client;
+- privileged endpoint with missing authorization;
+- reproducible cross-user or cross-tenant access;
+- private files publicly retrievable;
+- client-writable membership or role escalation.
+
+### Significant concern
+
+Examples:
+
+- inconsistent RLS coverage;
+- unsafe `SECURITY DEFINER` function;
+- overbroad permissive policies;
+- missing ownership validation on a write path;
+- tenant relationships without enforced integrity.
+
+### Requires verification
+
+Examples:
+
+- complex policies whose behavior has not been tested;
+- missing policies that may represent either intentional deny or broken functionality;
+- duplicated rules that appear consistent but lack a shared source of truth;
+- privileged operations whose caller restrictions are not documented.
+
+Priority reflects the current evidence and potential impact. It is not a complete project-level risk rating.
+
+---
+
+## Triage summary template
+
+```text
+Supabase Backend Security Triage
+
+Scope reviewed:
+- tables:
+- RPC functions:
+- Edge Functions:
+- Storage buckets:
+- other privileged paths:
+
+Execution contexts identified:
+- user JWT / authenticated:
+- anon:
+- service_role or other privileged role:
+
+Immediate findings:
+- [asset and request path]
+- [observed behavior]
+- [potential impact]
+
+Areas requiring deeper review:
+- [unverified ownership or tenant rule]
+- [function or endpoint requiring behavioral testing]
+
+Recommended next actions:
+1. [contain or verify the highest-priority finding]
+2. [perform two-user boundary test]
+3. [complete operation-specific RLS and privilege review]
+
+Limitations:
+- [assets not reviewed]
+- [tests not executed]
+- [environment or access limitations]
+```
+
+---
+
+## Common patterns worth investigating
+
+Frequently encountered patterns include:
+
+1. RLS disabled on a client-accessible private table.
+2. `service_role` used to bypass an unexplained authorization failure.
+3. Ownership derived from an unprotected membership table.
+4. Public Storage used for data that users expect to remain private.
+5. Authenticated-only RPCs executable by `anon`.
+6. Authorization implemented only in frontend or Edge code.
+7. Policies tested with one identity but not across ownership boundaries.
+
+These are investigation prompts, not findings until confirmed in the reviewed project.
+
+---
+
+## Core principle
+
+The database enforces data authorization.
+
+Privileged application code explicitly enforces authorization before bypassing database protections.
+
+Edge Functions and APIs orchestrate trusted operations.
+
+The frontend may guide user behavior, but it is never the security boundary.
+
+---
+
+## References
+
+- [PostgreSQL: Row Security Policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html)
+- [PostgreSQL: CREATE POLICY](https://www.postgresql.org/docs/current/sql-createpolicy.html)
+- [Supabase: Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)
+- [Supabase: Database Functions](https://supabase.com/docs/guides/database/functions)
+- [Supabase: Storage Access Control](https://supabase.com/docs/guides/storage/security/access-control)

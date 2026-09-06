@@ -80,7 +80,7 @@ async function main() {
 
   assert(userA.id !== userB.id, "Test users must have different IDs");
 
-  const { data: createdRows, error: validRpcError } = await clientA.rpc(
+  const { data: created, error: validRpcError } = await clientA.rpc(
     "create_contact_message",
     {
       p_name: "User A",
@@ -90,9 +90,10 @@ async function main() {
   );
 
   expectNoError(validRpcError, "Authenticated RPC call failed");
-  assert(createdRows.length === 1, "RPC must return one created row");
-
-  const created = createdRows[0];
+  assert(
+    created && typeof created === "object" && !Array.isArray(created),
+    "RPC must return one created row object",
+  );
 
   assert(created.user_id === userA.id, "Created message has the wrong owner");
   assert(

@@ -1,0 +1,11 @@
+{
+  "name": "supabase-patterns",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:rls": "node rls-pattern-example/test-rls-isolation.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2"
+  }
+}
